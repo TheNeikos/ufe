@@ -1,15 +1,42 @@
+#![deny(
+    unreachable_pub,
+    unsafe_code,
+    missing_docs,
+    missing_debug_implementations
+)]
+#![doc = include_str!("../README.md")]
+
 use std::{marker::PhantomData, ops::Range};
 
+/// All the methods to render an [`UserFacingError`]
 pub mod render;
 
+/// Types that can be represented as [`UserFacingError`]s
 pub trait AsUserFacingError {
+    /// Turn the instance into an [`UserFacingError`]
     fn as_user_facing_error(&self, ctx: &UFEContext) -> UserFacingError;
 }
 
+/// Internal Information for generating [`UserFacingError`]s
 pub struct UFEContext {
     _private: PhantomData<()>,
 }
 
+impl std::fmt::Debug for UFEContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UFEContext").finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug)]
+/// An Object that can turn an unknown [`std::error::Error`] into a potential [`UserFacingError`].
+///
+/// There are two ways to create an [`UFEConverter`]:
+///
+/// - [`UFEConverter::for_ufe`] which is the safest way for types that implement
+///   [`AsUserFacingError`]
+/// - [`UFEConverter::custom`] which allows you to add an implementation for types that do not
+///   support it per default
 pub struct UFEConverter {
     convert: fn(&(dyn std::error::Error + 'static), ctx: &UFEContext) -> Option<UserFacingError>,
 }
@@ -26,19 +53,32 @@ fn convert<T: AsUserFacingError + std::error::Error + 'static>(
 }
 
 impl UFEConverter {
+    /// Create a converter for a type that implements [`AsUserFacingError`]
     pub const fn for_ufe<T: AsUserFacingError + std::error::Error + 'static>() -> Self {
         UFEConverter {
             convert: convert::<T>,
         }
     }
 
+    /// Create a converter for any kind of [`std::error::Error`]
+    ///
+    /// The given function can be used to downcast to a specific type.
+    /// So for example, if another crate has an error you wish to embellish or display differently,
+    /// you could downcast it here with `std::error::Error::downcast_ref` and then create a
+    /// [`UserFacingError`].
+    ///
+    /// # Warning
+    ///
+    /// Do **not** simply always return a [`Some`] as this will cause it to be overriden for every
+    /// single error type! Probably not what you want.
     pub const fn custom(
-        f: fn(&(dyn std::error::Error + 'static), ctx: &UFEContext) -> Option<UserFacingError>,
+        f: fn(e: &(dyn std::error::Error + 'static), ctx: &UFEContext) -> Option<UserFacingError>,
     ) -> Self {
         UFEConverter { convert: f }
     }
 }
 
+/// The global slice of all known [`UFEConverter`]s that will be used during error generation
 #[linkme::distributed_slice]
 pub static UFE_SUPPORTED: [UFEConverter] = [..];
 
@@ -78,34 +118,78 @@ pub static UFE_SUPPORTED: [UFEConverter] = [..];
 /// This approach is more work, but leads to more informative errors for end users.
 #[derive(Debug)]
 pub struct UserFacingError {
+    /// The cause of the error
     pub error: ErrorCause,
+    /// Errors that are related by either being the source or adjacent to this error
     pub related: Vec<UserFacingError>,
 }
 
+/// A label in a piece of text, shown to the user
 #[derive(Debug)]
 pub struct FileLabel {
+    /// The byte-indexed slice where this label gets applied to
     pub range: Range<usize>,
+    /// The message shown to the user
     pub message: String,
 }
 
 #[derive(Debug)]
+/// A file and labels that highlight parts of it
 pub struct FileHighlight {
+    /// The path where the file was found
     pub path: String,
+    /// The content of the file when it errored
     pub content: String,
+    /// The list of labels that indicate the error
     pub labels: Vec<FileLabel>,
 }
 
 #[derive(Debug, Default, derive_setters::Setters)]
 #[setters(strip_option)]
 #[non_exhaustive]
+/// The cause of an error
+///
+/// # Note
+///
+/// This struct is annotated to be extended in the future. You should only construct it by using
+/// the default constructor [`ErrorCause::default`]. You should then customize it by using the
+/// provided setters.
 pub struct ErrorCause {
+    /// A succinct explanation of what went wrong
+    ///
+    /// Aim to be precise but do not use overly specific language. This summary will always be
+    /// shown to users.
     pub summary: String,
+    /// An extended explanation of why the error (might) have happened. Try to not speculate. If
+    /// there are things you can check during construction of the error, do so.
     pub extended_reason: Option<String>,
+    /// If one or multiple files are associated to this error, mark them here.
     pub file_highlights: Vec<FileHighlight>,
 }
 
+/// A helper struct to turn any reference to an [`std::error::Error`] into either the best
+/// [`UserFacingError`] possible or, if it has been previously registered into [`static@UFE_SUPPORTED`], then it will
+/// use that converter.
+///
+/// # Note
+///
+/// Currently the only kind of reference that is supported is a somewhat unwieldy
+/// `&(dyn std::error::Error + 'static)`. This is the only kind of construct that allows you to
+/// downcast errors in Rust. You will find it for example in the return type of
+/// [`std::error::Error::source`]. Generally, when you have a concrete type `E` a normal reference
+/// to it _is_ going to work.
 #[derive(Debug)]
-pub struct PotentiallyUnclearError<E>(pub E);
+pub struct PotentiallyUnclearError<E>(E);
+
+impl<'a> PotentiallyUnclearError<&'a (dyn std::error::Error + 'static)> {
+    /// Create a potentially unclear error from a type that implements [`std::error::Error`]
+    ///
+    /// This will automatically pick the correct UserFacingError implementation if it has been
+    /// registered
+    pub fn from_error<E: std::error::Error + 'static>(e: &'a E) -> Self {
+        Self(e as &dyn std::error::Error)
+    }
+}
 
 impl AsUserFacingError for PotentiallyUnclearError<&(dyn std::error::Error + 'static)> {
     fn as_user_facing_error(&self, ctx: &UFEContext) -> UserFacingError {

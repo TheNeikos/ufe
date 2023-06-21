@@ -18,6 +18,7 @@ impl Context {
     }
 }
 
+/// Render a chain of errors to the user, meant to be displayed on the terminal
 pub fn render_for_terminal(error: &UserFacingError, max_width: usize) -> String {
     let context = Context {
         _max_width: max_width,
